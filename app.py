@@ -1,35 +1,97 @@
-"""Streamlit app: generate LinkedIn posts with a local Ollama model."""
+"""Streamlit app: generate LinkedIn posts with Groq or a local Ollama model."""
+
+import os
 
 import streamlit as st
 
-from ollama_client import OllamaError, generate_post, list_models
+from ollama_client import OllamaError, generate_post
 from prompts import ANGLES, LENGTHS, TONES, build_prompt
 
 MODEL = "llama3.2:3b"
+GROQ_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+
+
+class AskError(Exception):
+    """Raised when neither Groq nor Ollama can generate a post."""
+
+
+def get_groq_key():
+    """Return GROQ_API_KEY from environment or Streamlit secrets, if present."""
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if key:
+        return key
+
+    # st.secrets may not exist locally, so we handle that safely.
+    try:
+        key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        return None
+
+    return key.strip() if key else None
+
+
+def ask_llama(prompt, temperature=0.8):
+    """Use Groq when a key exists, otherwise fall back to local Ollama."""
+    groq_key = get_groq_key()
+
+    if groq_key:
+        # Import only when needed, so local Ollama still works without groq.
+        try:
+            from groq import Groq, NotFoundError
+        except ImportError as error:
+            raise AskError(
+                "Groq library is not installed. Run `pip install groq`."
+            ) from error
+
+        client = Groq(api_key=groq_key)
+        last_error = None
+
+        for model_name in GROQ_MODELS:
+            try:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=700,
+                )
+                text = (response.choices[0].message.content or "").strip()
+                if text:
+                    return text
+                last_error = AskError("Groq returned an empty response.")
+            except NotFoundError as error:
+                # Model unavailable? Try the next model in the list.
+                last_error = error
+            except Exception as error:
+                raise AskError(f"Groq error: {error}") from error
+
+        raise AskError(f"Groq models are not available: {last_error}")
+
+    # No Groq key: use the local Ollama model.
+    try:
+        return generate_post(prompt, model=MODEL, temperature=temperature)
+    except OllamaError as error:
+        raise AskError(
+            f"{error} If this app is online, add GROQ_API_KEY to Streamlit secrets."
+        ) from error
+
 
 st.set_page_config(page_title="LinkedIn Post Generator", layout="centered")
 
 st.title("LinkedIn Post Generator")
-st.caption("Runs fully on your machine with Ollama. No API keys needed.")
+st.caption("Uses Groq on Streamlit Cloud, or local Ollama when no Groq key is set.")
 
 
-# ---------- Sidebar: check that Ollama and the model are ready ----------
+# ---------- Sidebar: show which backend will be used ----------
 with st.sidebar:
-    st.header("Ollama status")
-    installed_models = list_models()
-
-    if installed_models is None:
-        st.error("Ollama is not running.")
-        st.write("Start it in a terminal:")
-        st.code("ollama serve", language="bash")
+    st.header("Backend")
+    if get_groq_key():
+        st.success("Using Groq (cloud)")
+        st.write("Models: `openai/gpt-oss-20b`, then `openai/gpt-oss-120b`")
     else:
-        st.success("Ollama is running.")
-        model_names = [name.split(":")[0] for name in installed_models]
-        if MODEL.split(":")[0] in model_names:
-            st.write(f"Model `{MODEL}` is installed.")
-        else:
-            st.warning(f"Model `{MODEL}` is not installed.")
-            st.code(f"ollama pull {MODEL}", language="bash")
+        st.info("Using local Ollama")
+        st.write(f"Model: `{MODEL}`")
+        st.write("Make sure Ollama is running:")
+        st.code("ollama serve", language="bash")
 
     st.divider()
     st.subheader("How to use")
@@ -80,9 +142,8 @@ if submitted:
                 )
 
                 with st.spinner(f"Writing variation {index + 1} of {len(ANGLES)}..."):
-                    text = generate_post(
+                    text = ask_llama(
                         prompt,
-                        model=MODEL,
                         temperature=0.7 + (index * 0.15),
                     )
 
@@ -93,7 +154,7 @@ if submitted:
                 )
 
             st.session_state["posts"] = posts
-        except OllamaError as error:
+        except AskError as error:
             st.error(str(error))
         finally:
             progress.empty()
