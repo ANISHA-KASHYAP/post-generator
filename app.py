@@ -52,11 +52,13 @@ def ask_llama(prompt, temperature=0.8):
                     model=model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
-                    max_tokens=700,
+                    max_completion_tokens=2000,
+                    reasoning_effort="low",
                 )
-                text = (response.choices[0].message.content or "").strip()
-                if text:
-                    return text
+                content = response.choices[0].message.content
+                if content and content.strip():
+                    return content.strip()
+                # Empty or None content means this model failed; try the next one.
                 last_error = AskError("Groq returned an empty response.")
             except NotFoundError as error:
                 # Model unavailable? Try the next model in the list.
